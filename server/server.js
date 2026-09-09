@@ -27,7 +27,7 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions)); // Handle Preflight explicitly
+
 app.use(express.json());
 
 // MongoDB connection (Supports Atlas on Render & Localhost fallback)
