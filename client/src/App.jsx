@@ -15,7 +15,7 @@ import AboutView from './components/AboutView';
 
 import { getStoredData, appendStoredData, getStoredChats, saveStoredChats } from './utils/storage';
 
-// Render production backend URL with fallback
+// Production Render backend URL with fallback
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'https://voicemeet-ymfi.onrender.com';
 const API_BASE = `${BACKEND_URL}/api`;
 const SOCKET_SERVER = BACKEND_URL;
@@ -127,6 +127,13 @@ export default function App() {
     socket.on('direct-call-cancelled', () => {
       if (callTimerRef.current) clearInterval(callTimerRef.current);
       setIncomingCallData(null);
+    });
+
+    // Jab direct friend call disconnect ho jaye
+    socket.on('call-ended', () => {
+      setActiveDirectCallSession(null);
+      if (callTimerRef.current) clearInterval(callTimerRef.current);
+      reloadUserData();
     });
 
     socket.on('incoming-friend-request', ({ requester }) => {
@@ -499,6 +506,7 @@ export default function App() {
               <VoiceChat 
                 key={activeDirectCallSession ? activeDirectCallSession.roomId : 'random_match_room'}
                 currentUser={user} 
+                existingFriends={friends}
                 directCallData={activeDirectCallSession}
                 onCallEnd={() => {
                   setActiveDirectCallSession(null);

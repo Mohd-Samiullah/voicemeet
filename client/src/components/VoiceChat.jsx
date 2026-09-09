@@ -2,23 +2,28 @@
 import { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
 
-// Production Render URL with environment variable fallback
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'https://voicemeet-ymfi.onrender.com';
 const SOCKET_SERVER = BACKEND_URL;
 
-const defaultRtcConfig = {
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' }
-  ]
-};
+const defaultIceServers = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun2.l.google.com:19302' },
+  {
+    urls: 'turn:openrelay.metered.ca:80',
+    username: 'openrelayproject',
+    credential: 'openrelayproject'
+  },
+  {
+    urls: 'turn:openrelay.metered.ca:443',
+    username: 'openrelayproject',
+    credential: 'openrelayproject'
+  }
+];
 
-export default function VoiceChat({ currentUser, directCallData, onCallEnd }) {
-  const [status, setStatus] = useState('idle'); // idle | searching | connected | ended
+export default function VoiceChat({ currentUser, directCallData, onCallEnd, existingFriends = [] }) {
+  const [status, setStatus] = useState('idle');
   const [isMuted, setIsMuted] = useState(false);
-  const [genderFilter, setGenderFilter] = useState('any');
-  const [showPaywall, setShowPaywall] = useState(false);
   const [searchSeconds, setSearchSeconds] = useState(0);
 
   const [currentPartner, setCurrentPartner] = useState(null);
@@ -33,6 +38,12 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd }) {
   const remoteAudioRef = useRef(null);
   const currentRoomRef = useRef(null);
   const timerRef = useRef(null);
+  const pendingCandidatesRef = useRef([]);
+
+  const isAlreadyFriend = currentPartner && (
+    existingFriends.some(f => String(f._id || f) === String(currentPartner._id)) ||
+    (currentUser?.friends && currentUser.friends.some(f => String(f._id || f) === String(currentPartner._id)))
+  );
 
   const cleanupWebRTC = () => {
     if (pcRef.current) {
@@ -49,6 +60,7 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd }) {
     if (remoteAudioRef.current) {
       remoteAudioRef.current.srcObject = null;
     }
+    pendingCandidatesRef.current = [];
   };
 
   const handleCallTermination = () => {
@@ -86,19 +98,34 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd }) {
 
       if (data.sdp) {
         await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+
+        // Flush any candidates received while remote description was configuring
+        while (pendingCandidatesRef.current.length > 0) {
+          const cand = pendingCandidatesRef.current.shift();
+          try {
+            await pc.addIceCandidate(new RTCIceCandidate(cand));
+          } catch (e) {
+            console.error('Flushing candidate error', e);
+          }
+        }
+
         if (data.sdp.type === 'offer') {
           const answer = await pc.createAnswer({ offerToReceiveAudio: true });
           await pc.setLocalDescription(answer);
-          socketRef.current.emit('signal', {
+          socketRef.current?.emit('signal', {
             roomId: currentRoomRef.current,
             signalData: { sdp: pc.localDescription }
           });
         }
       } else if (data.candidate) {
-        try {
-          await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
-        } catch (e) {
-          console.error('ICE Candidate error', e);
+        if (pc.remoteDescription && pc.remoteDescription.type) {
+          try {
+            await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+          } catch (e) {
+            console.error('Direct ICE Candidate error', e);
+          }
+        } else {
+          pendingCandidatesRef.current.push(data.candidate);
         }
       }
     });
@@ -146,19 +173,7 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd }) {
       });
       localStreamRef.current = stream;
 
-      // Fetch dynamic TURN/STUN servers from backend if available
-      let iceServers = defaultRtcConfig.iceServers;
-      try {
-        const res = await fetch(`${BACKEND_URL}/api/ice-servers`);
-        const data = await res.json();
-        if (data?.iceServers?.length) {
-          iceServers = data.iceServers;
-        }
-      } catch (err) {
-        console.warn('Using default STUN servers fallback');
-      }
-
-      const pc = new RTCPeerConnection({ iceServers });
+      const pc = new RTCPeerConnection({ iceServers: defaultIceServers });
       pcRef.current = pc;
 
       stream.getAudioTracks().forEach((track) => {
@@ -171,7 +186,7 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd }) {
           remoteAudioRef.current.srcObject = event.streams[0];
           remoteAudioRef.current.volume = 1.0;
           remoteAudioRef.current.play().catch((err) => {
-            console.warn('Audio play gesture required:', err);
+            console.warn('Audio auto-play gesture required:', err);
           });
         }
       };
@@ -191,18 +206,15 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd }) {
         }
       };
 
-      socketRef.current.emit('join-call-room', { roomId });
+      socketRef.current?.emit('join-call-room', { roomId });
 
       if (initiator) {
-        setTimeout(async () => {
-          if (!pcRef.current) return;
-          const offer = await pcRef.current.createOffer({ offerToReceiveAudio: true });
-          await pcRef.current.setLocalDescription(offer);
-          socketRef.current.emit('signal', {
-            roomId,
-            signalData: { sdp: pcRef.current.localDescription }
-          });
-        }, 400);
+        const offer = await pc.createOffer({ offerToReceiveAudio: true });
+        await pc.setLocalDescription(offer);
+        socketRef.current?.emit('signal', {
+          roomId,
+          signalData: { sdp: pc.localDescription }
+        });
       }
     } catch (err) {
       console.error('Microphone error:', err);
@@ -219,7 +231,7 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd }) {
       setSearchSeconds((prev) => prev + 1);
     }, 1000);
 
-    socketRef.current.emit('find-match', { userId: currentUser?._id || null });
+    socketRef.current?.emit('find-match', { userId: currentUser?._id || null });
   };
 
   const toggleMute = () => {
@@ -234,28 +246,29 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd }) {
   };
 
   const endCall = () => {
-    if (socketRef.current) {
+    if (socketRef.current && currentRoomRef.current) {
       socketRef.current.emit('end-call');
+      socketRef.current.emit('signal', {
+        roomId: currentRoomRef.current,
+        signalData: { callEnded: true }
+      });
     }
     handleCallTermination();
   };
 
-  // Trigger real-time Friend Request to partner
   const handleAddFriend = () => {
     if (!currentUser?._id || !currentPartner?._id || !socketRef.current) return;
-
     socketRef.current.emit('send-friend-request', {
       requester: currentUser,
       targetUserId: currentPartner._id
     });
-
     setFriendRequestSent(true);
   };
 
   const submitReport = (e) => {
     e.preventDefault();
     if (!reportDetails.trim()) return;
-    socketRef.current.emit('submit-report', {
+    socketRef.current?.emit('submit-report', {
       reporterId: currentUser?._id,
       reportedId: currentPartner?._id || null,
       reason: reportReason,
@@ -272,7 +285,6 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd }) {
   return (
     <div className="w-full max-w-5xl mx-auto px-4 py-4 text-slate-100">
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-        
         <section className="lg:col-span-8 bg-slate-900/60 backdrop-blur-2xl border border-slate-800 rounded-3xl p-8 shadow-2xl flex flex-col items-center justify-between min-h-[540px] relative overflow-hidden">
           <div className="w-full flex items-center justify-between border-b border-slate-800 pb-4 z-10">
             <span className="text-xs uppercase font-bold tracking-widest text-slate-400">Audio Session</span>
@@ -347,18 +359,24 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd }) {
                     </div>
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={handleAddFriend}
-                    disabled={friendRequestSent}
-                    className={`px-4 py-2 rounded-xl text-xs font-bold transition cursor-pointer ${
-                      friendRequestSent 
-                        ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' 
-                        : 'bg-indigo-600 hover:bg-indigo-500 text-white'
-                    }`}
-                  >
-                    {friendRequestSent ? 'Request Pending ⏳' : 'Add to Friends 🤝'}
-                  </button>
+                  {isAlreadyFriend ? (
+                    <span className="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
+                      Already Friends 🤝
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={handleAddFriend}
+                      disabled={friendRequestSent}
+                      className={`px-4 py-2 rounded-xl text-xs font-bold transition cursor-pointer ${
+                        friendRequestSent 
+                          ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' 
+                          : 'bg-indigo-600 hover:bg-indigo-500 text-white'
+                      }`}
+                    >
+                      {friendRequestSent ? 'Request Pending ⏳' : 'Add to Friends 🤝'}
+                    </button>
+                  )}
                 </div>
               )}
 
@@ -420,23 +438,6 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd }) {
         </section>
       </div>
 
-      {showPaywall && (
-        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 z-50">
-          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 max-w-sm w-full text-center shadow-2xl">
-            <h3 className="text-lg font-bold text-white">Unlock Pro Filters 👑</h3>
-            <p className="text-xs text-slate-400 mt-2">Filter exclusively by gender and eliminate queue wait times.</p>
-            <div className="my-5 p-3 rounded-2xl bg-slate-800/60 border border-slate-700">
-              <span className="text-2xl font-black text-amber-400">₹49</span>
-              <span className="text-xs text-slate-400"> / 24 Hours</span>
-            </div>
-            <button onClick={() => setShowPaywall(false)} className="w-full py-2 mt-2 text-xs text-slate-400 hover:text-slate-200 cursor-pointer">
-              Close
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Plays remote audio directly */}
       <audio ref={remoteAudioRef} autoPlay playsInline />
     </div>
   );
