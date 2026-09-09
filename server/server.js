@@ -6,12 +6,28 @@ import mongoose from 'mongoose';
 
 const app = express();
 
-// Full CORS enable for Netlify & Localhost
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'PUT', 'DELETE'],
-  credentials: true
-}));
+// Allowed Origins for Localhost and Netlify
+const allowedOrigins = [
+  'https://voicemeets.netlify.app',
+  'http://localhost:5173',
+  'http://localhost:3000'
+];
+
+const corsOptions = {
+  origin: function (origin, callback) {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.indexOf(origin) !== -1 || origin.endsWith('.netlify.app')) {
+      return callback(null, true);
+    }
+    return callback(null, true); // Fallback to allow connection
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+};
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions)); // Handle Preflight explicitly
 app.use(express.json());
 
 // MongoDB connection (Supports Atlas on Render & Localhost fallback)
@@ -146,7 +162,7 @@ app.post('/api/user/remove-friend', async (req, res) => {
 // ================= SOCKET.IO ENGINE =================
 const server = createServer(app);
 const io = new Server(server, {
-  cors: { origin: '*', methods: ['GET', 'POST'] },
+  cors: corsOptions,
   pingTimeout: 10000,
   pingInterval: 10000
 });
