@@ -93,13 +93,17 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd, exis
     });
 
     socket.on('signal', async (data) => {
+      if (data.callEnded) {
+        handleCallTermination();
+        return;
+      }
+
       const pc = pcRef.current;
       if (!pc) return;
 
       if (data.sdp) {
         await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
 
-        // Flush any candidates received while remote description was configuring
         while (pendingCandidatesRef.current.length > 0) {
           const cand = pendingCandidatesRef.current.shift();
           try {
@@ -186,7 +190,7 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd, exis
           remoteAudioRef.current.srcObject = event.streams[0];
           remoteAudioRef.current.volume = 1.0;
           remoteAudioRef.current.play().catch((err) => {
-            console.warn('Audio auto-play gesture required:', err);
+            console.warn('Audio play gesture required:', err);
           });
         }
       };
@@ -246,12 +250,14 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd, exis
   };
 
   const endCall = () => {
-    if (socketRef.current && currentRoomRef.current) {
+    if (socketRef.current) {
       socketRef.current.emit('end-call');
-      socketRef.current.emit('signal', {
-        roomId: currentRoomRef.current,
-        signalData: { callEnded: true }
-      });
+      if (currentRoomRef.current) {
+        socketRef.current.emit('signal', {
+          roomId: currentRoomRef.current,
+          signalData: { callEnded: true }
+        });
+      }
     }
     handleCallTermination();
   };

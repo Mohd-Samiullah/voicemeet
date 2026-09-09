@@ -19,7 +19,7 @@ const corsOptions = {
     if (allowedOrigins.indexOf(origin) !== -1 || origin.endsWith('.netlify.app')) {
       return callback(null, true);
     }
-    return callback(null, true); // Fallback to allow connection
+    return callback(null, true);
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -27,7 +27,6 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-
 app.use(express.json());
 
 // MongoDB connection (Supports Atlas on Render & Localhost fallback)
@@ -70,7 +69,6 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', message: 'VoiceMeet Engine is active' });
 });
 
-// TURN & STUN Relay Servers for Strict Wi-Fi / College Networks
 app.get('/api/ice-servers', (req, res) => {
   const iceServers = [
     { urls: 'stun:stun.l.google.com:19302' },
@@ -169,6 +167,7 @@ const io = new Server(server, {
 
 let waitingQueue = [];
 const activeSessions = new Map();
+const socketRooms = new Map();
 
 io.on('connection', (socket) => {
   console.log(`[Socket Connected] ID: ${socket.id}`);
@@ -184,6 +183,8 @@ io.on('connection', (socket) => {
   socket.on('join-call-room', ({ roomId }) => {
     if (!roomId) return;
     socket.join(roomId);
+    socketRooms.set(socket.id, roomId);
+    console.log(`[Room Joined] Socket ${socket.id} joined ${roomId}`);
   });
 
   socket.on('find-match', async (data = {}) => {
@@ -200,6 +201,8 @@ io.on('connection', (socket) => {
 
       socket.join(roomId);
       io.sockets.sockets.get(partner.socketId)?.join(roomId);
+      socketRooms.set(socket.id, roomId);
+      socketRooms.set(partner.socketId, roomId);
 
       const currentDbUser = userId ? await User.findById(userId).catch(() => null) : null;
       const partnerDbUser = partner.userId ? await User.findById(partner.userId).catch(() => null) : null;
@@ -217,35 +220,80 @@ io.on('connection', (socket) => {
   });
 
   const finishCall = async (sockId) => {
+    const roomId = socketRooms.get(sockId);
     const session = activeSessions.get(sockId);
-    if (!session) return;
 
-    const durationSeconds = Math.round((Date.now() - session.startTime) / 1000);
-    const durationMinutes = Math.max(1, Math.round(durationSeconds / 60));
-
-    try {
-      if (session.userId) {
-        await User.findByIdAndUpdate(session.userId, {
-          $inc: { totalCalls: 1, totalMinutes: durationMinutes, score: 25 }
-        });
-      }
-      if (session.partnerUserId) {
-        await User.findByIdAndUpdate(session.partnerUserId, {
-          $inc: { totalCalls: 1, totalMinutes: durationMinutes, score: 25 }
-        });
-      }
-    } catch (e) {
-      console.error(e);
+    if (roomId) {
+      io.to(roomId).emit('call-ended');
+      socket.to(roomId).emit('call-ended');
     }
 
-    io.to(session.partnerSocketId).emit('call-ended', { durationMinutes, lastPartnerUserId: session.userId });
-    socket.emit('call-ended', { durationMinutes, lastPartnerUserId: session.partnerUserId });
+    if (session) {
+      const durationSeconds = Math.round((Date.now() - session.startTime) / 1000);
+      const durationMinutes = Math.max(1, Math.round(durationSeconds / 60));
 
-    activeSessions.delete(session.partnerSocketId);
-    activeSessions.delete(sockId);
+      try {
+        if (session.userId) {
+          await User.findByIdAndUpdate(session.userId, {
+            $inc: { totalCalls: 1, totalMinutes: durationMinutes, score: 25 }
+          });
+        }
+        if (session.partnerUserId) {
+          await User.findByIdAndUpdate(session.partnerUserId, {
+            $inc: { totalCalls: 1, totalMinutes: durationMinutes, score: 25 }
+          });
+        }
+      } catch (e) {
+        console.error(e);
+      }
+
+      io.to(session.partnerSocketId).emit('call-ended', { durationMinutes, lastPartnerUserId: session.userId });
+      activeSessions.delete(session.partnerSocketId);
+      activeSessions.delete(sockId);
+    }
+
+    socket.emit('call-ended');
+    socketRooms.delete(sockId);
   };
 
   socket.on('end-call', () => finishCall(socket.id));
+
+  socket.on('initiate-direct-call', ({ caller, receiverId }) => {
+    if (!caller?._id || !receiverId) return;
+    const roomId = `direct_room_${caller._id}_${receiverId}_${Date.now()}`;
+    socket.join(roomId);
+    socketRooms.set(socket.id, roomId);
+
+    io.to(`user_${receiverId}`).emit('incoming-direct-call', {
+      caller,
+      roomId
+    });
+  });
+
+  socket.on('accept-direct-call', ({ callerId, receiver, caller, roomId }) => {
+    socket.join(roomId);
+    socketRooms.set(socket.id, roomId);
+
+    io.to(`user_${callerId}`).emit('direct-call-accepted', {
+      partner: receiver,
+      roomId,
+      initiator: true
+    });
+
+    socket.emit('direct-call-accepted', {
+      partner: caller,
+      roomId,
+      initiator: false
+    });
+  });
+
+  socket.on('reject-direct-call', ({ callerId }) => {
+    io.to(`user_${callerId}`).emit('direct-call-rejected');
+  });
+
+  socket.on('cancel-direct-call', ({ receiverId }) => {
+    io.to(`user_${receiverId}`).emit('direct-call-cancelled');
+  });
 
   socket.on('send-message', ({ myUserId, friendUserId, text, senderName }) => {
     if (!myUserId || !friendUserId || !text?.trim()) return;
@@ -276,41 +324,6 @@ io.on('connection', (socket) => {
     io.to(`user_${String(requesterId)}`).emit('friend-request-rejected');
   });
 
-  socket.on('initiate-direct-call', ({ caller, receiverId }) => {
-    if (!caller?._id || !receiverId) return;
-    const roomId = `direct_room_${caller._id}_${receiverId}_${Date.now()}`;
-    socket.join(roomId);
-
-    io.to(`user_${receiverId}`).emit('incoming-direct-call', {
-      caller,
-      roomId
-    });
-  });
-
-  socket.on('accept-direct-call', ({ callerId, receiver, caller, roomId }) => {
-    socket.join(roomId);
-
-    io.to(`user_${callerId}`).emit('direct-call-accepted', {
-      partner: receiver,
-      roomId,
-      initiator: true
-    });
-
-    socket.emit('direct-call-accepted', {
-      partner: caller,
-      roomId,
-      initiator: false
-    });
-  });
-
-  socket.on('reject-direct-call', ({ callerId }) => {
-    io.to(`user_${callerId}`).emit('direct-call-rejected');
-  });
-
-  socket.on('cancel-direct-call', ({ receiverId }) => {
-    io.to(`user_${receiverId}`).emit('direct-call-cancelled');
-  });
-
   socket.on('submit-report', async ({ reporterId, reportedId, reason, details }) => {
     if (reporterId) {
       await Report.create({
@@ -329,6 +342,5 @@ io.on('connection', (socket) => {
   });
 });
 
-// Render dynamic PORT binding
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, '0.0.0.0', () => console.log(`🚀 Server running on port ${PORT}`));
