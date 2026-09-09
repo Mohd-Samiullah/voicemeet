@@ -2,9 +2,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
 
-const SOCKET_SERVER = 'http://localhost:5000';
+// Production Render URL with environment variable fallback
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'https://voicemeet-ymfi.onrender.com';
+const SOCKET_SERVER = BACKEND_URL;
 
-const rtcConfig = {
+const defaultRtcConfig = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
@@ -60,7 +62,10 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd }) {
   };
 
   useEffect(() => {
-    const socket = io(SOCKET_SERVER);
+    const socket = io(SOCKET_SERVER, {
+      transports: ['websocket', 'polling'],
+      reconnectionAttempts: 10
+    });
     socketRef.current = socket;
 
     socket.on('matched', async ({ roomId, initiator, partner }) => {
@@ -141,7 +146,19 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd }) {
       });
       localStreamRef.current = stream;
 
-      const pc = new RTCPeerConnection(rtcConfig);
+      // Fetch dynamic TURN/STUN servers from backend if available
+      let iceServers = defaultRtcConfig.iceServers;
+      try {
+        const res = await fetch(`${BACKEND_URL}/api/ice-servers`);
+        const data = await res.json();
+        if (data?.iceServers?.length) {
+          iceServers = data.iceServers;
+        }
+      } catch (err) {
+        console.warn('Using default STUN servers fallback');
+      }
+
+      const pc = new RTCPeerConnection({ iceServers });
       pcRef.current = pc;
 
       stream.getAudioTracks().forEach((track) => {
@@ -401,23 +418,6 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd }) {
             )}
           </div>
         </section>
-
-        {/* <aside className="lg:col-span-4 space-y-6">
-          <div className="bg-slate-900/60 border border-slate-800 rounded-3xl p-6 shadow-xl space-y-4">
-            <h3 className="text-sm font-bold text-white">Target Filters</h3>
-            <div className="grid grid-cols-3 gap-2">
-              <button onClick={() => setGenderFilter('any')} className={`py-2 text-xs font-bold rounded-xl border transition cursor-pointer ${genderFilter === 'any' ? 'bg-indigo-600 text-white border-indigo-500' : 'bg-slate-850 text-slate-400 border-slate-700'}`}>
-                All
-              </button>
-              <button onClick={() => setShowPaywall(true)} className="py-2 text-xs font-bold rounded-xl border bg-slate-850/50 border-slate-700/60 text-slate-400 hover:text-amber-400 cursor-pointer">
-                Female 👑
-              </button>
-              <button onClick={() => setShowPaywall(true)} className="py-2 text-xs font-bold rounded-xl border bg-slate-850/50 border-slate-700/60 text-slate-400 hover:text-amber-400 cursor-pointer">
-                Male 👑
-              </button>
-            </div>
-          </div>
-        </aside> */}
       </div>
 
       {showPaywall && (
