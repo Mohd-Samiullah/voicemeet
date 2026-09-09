@@ -11,12 +11,14 @@ import ProfileView from './components/ProfileView';
 import FriendChat from './components/FriendChat';
 import VoiceChat from './components/VoiceChat';
 import NotificationPanel from './components/NotificationPanel';
-import AboutView from './components/AboutView'; // <-- AboutView import ho gaya
+import AboutView from './components/AboutView';
 
 import { getStoredData, appendStoredData, getStoredChats, saveStoredChats } from './utils/storage';
 
-const API_BASE = 'http://localhost:5000/api';
-const SOCKET_SERVER = 'http://localhost:5000';
+// Render production backend URL with fallback
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'https://voicemeet-ymfi.onrender.com';
+const API_BASE = `${BACKEND_URL}/api`;
+const SOCKET_SERVER = BACKEND_URL;
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('practice');
@@ -464,7 +466,7 @@ export default function App() {
                 onFindNewPeer={() => {
                   setActiveDirectCallSession(null);
                   setActiveTab('call');
-                }}
+                }} 
               />
             )
           )}
@@ -476,7 +478,6 @@ export default function App() {
             />
           )}
 
-          {/* About Us & Founder Section */}
           {activeTab === 'about' && (
             <AboutView />
           )}
