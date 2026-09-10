@@ -21,6 +21,16 @@ const defaultIceServers = [
   }
 ];
 
+// Ultra-low latency & clean voice SDP optimizer
+const optimizeOpusCodec = (sdp) => {
+  return sdp.replace(/a=fmtp:(\d+) (.*)/g, (match, pt, params) => {
+    if (sdp.includes(`a=rtpmap:${pt} opus/48000`)) {
+      return `a=fmtp:${pt} ${params};minptime=10;useinbandfec=1;stereo=0;sprop-stereo=0;cbr=1;maxaveragebitrate=32000`;
+    }
+    return match;
+  });
+};
+
 export default function VoiceChat({ currentUser, directCallData, onCallEnd, existingFriends = [] }) {
   const [status, setStatus] = useState('idle');
   const [isMuted, setIsMuted] = useState(false);
@@ -109,13 +119,18 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd, exis
           try {
             await pc.addIceCandidate(new RTCIceCandidate(cand));
           } catch (e) {
-            console.error('Flushing candidate error', e);
+            console.error('Candidate flush error', e);
           }
         }
 
         if (data.sdp.type === 'offer') {
           const answer = await pc.createAnswer({ offerToReceiveAudio: true });
-          await pc.setLocalDescription(answer);
+          const optimizedAnswer = new RTCSessionDescription({
+            type: 'answer',
+            sdp: optimizeOpusCodec(answer.sdp)
+          });
+          await pc.setLocalDescription(optimizedAnswer);
+
           socketRef.current?.emit('signal', {
             roomId: currentRoomRef.current,
             signalData: { sdp: pc.localDescription }
@@ -126,7 +141,7 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd, exis
           try {
             await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
           } catch (e) {
-            console.error('Direct ICE Candidate error', e);
+            console.error('Candidate addition error', e);
           }
         } else {
           pendingCandidatesRef.current.push(data.candidate);
@@ -166,17 +181,32 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd, exis
 
   const setupWebRTC = async (roomId, initiator) => {
     try {
+      // Hardware-level DSP noise reduction & echo elimination
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
-          autoGainControl: true
+          autoGainControl: true,
+          channelCount: 1, // Mono voice avoids stereo phase-cancellation & noise
+          sampleRate: 48000,
+          sampleSize: 16,
+          // Chromium & WebKit specific background filters
+          googEchoCancellation: true,
+          googAutoGainControl: true,
+          googNoiseSuppression: true,
+          googHighpassFilter: true,
+          googTypingNoiseDetection: true
         },
         video: false
       });
       localStreamRef.current = stream;
 
-      const pc = new RTCPeerConnection({ iceServers: defaultIceServers });
+      const pc = new RTCPeerConnection({
+        iceServers: defaultIceServers,
+        iceCandidatePoolSize: 2,
+        bundlePolicy: 'max-bundle',
+        rtcpMuxPolicy: 'require'
+      });
       pcRef.current = pc;
 
       stream.getAudioTracks().forEach((track) => {
@@ -188,9 +218,19 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd, exis
         if (remoteAudioRef.current) {
           remoteAudioRef.current.srcObject = event.streams[0];
           remoteAudioRef.current.volume = 1.0;
-          remoteAudioRef.current.play().catch((err) => {
-            console.warn('Audio auto-play gesture required:', err);
-          });
+          
+          // Instant audio playback without waiting
+          const playPromise = remoteAudioRef.current.play();
+          if (playPromise !== undefined) {
+            playPromise.catch(() => {
+              // Retry on user interaction if browser policy demands it
+              const unblockAudio = () => {
+                remoteAudioRef.current?.play();
+                window.removeEventListener('click', unblockAudio);
+              };
+              window.addEventListener('click', unblockAudio, { once: true });
+            });
+          }
         }
       };
 
@@ -212,15 +252,23 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd, exis
       socketRef.current?.emit('join-call-room', { roomId });
 
       if (initiator) {
-        const offer = await pc.createOffer({ offerToReceiveAudio: true });
-        await pc.setLocalDescription(offer);
+        const offer = await pc.createOffer({
+          offerToReceiveAudio: true,
+          voiceActivityDetection: true
+        });
+        const optimizedOffer = new RTCSessionDescription({
+          type: 'offer',
+          sdp: optimizeOpusCodec(offer.sdp)
+        });
+        await pc.setLocalDescription(optimizedOffer);
+
         socketRef.current?.emit('signal', {
           roomId,
           signalData: { sdp: pc.localDescription }
         });
       }
     } catch (err) {
-      console.error('Microphone error:', err);
+      console.error('Microphone initialization error:', err);
       setStatus('idle');
       alert('Microphone permission required for voice calls!');
     }
@@ -355,7 +403,6 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd, exis
                 <p className="text-xs text-slate-400">Connection closed cleanly.</p>
               </div>
 
-              {/* Responsive Partner Profile Card */}
               {currentPartner && (
                 <div className="bg-slate-850/70 border border-slate-750 p-4 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-md">
                   <div className="flex items-center gap-3 min-w-0">
@@ -393,7 +440,6 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd, exis
                 </div>
               )}
 
-              {/* Report Form */}
               <form onSubmit={submitReport} className="bg-slate-800/40 border border-slate-700/50 p-4 rounded-2xl flex flex-col gap-3">
                 <span className="text-xs font-bold text-rose-400 uppercase tracking-wider">Report Misconduct ⚠️</span>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
