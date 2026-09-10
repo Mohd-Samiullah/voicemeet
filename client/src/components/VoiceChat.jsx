@@ -149,7 +149,6 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd, exis
     };
   }, []);
 
-  // Direct Call Initialization
   useEffect(() => {
     if (directCallData && directCallData.roomId && socketRef.current) {
       setStatus('connected');
@@ -190,7 +189,7 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd, exis
           remoteAudioRef.current.srcObject = event.streams[0];
           remoteAudioRef.current.volume = 1.0;
           remoteAudioRef.current.play().catch((err) => {
-            console.warn('Audio play gesture required:', err);
+            console.warn('Audio auto-play gesture required:', err);
           });
         }
       };
@@ -250,11 +249,12 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd, exis
   };
 
   const endCall = () => {
+    const activeRoom = currentRoomRef.current;
     if (socketRef.current) {
-      socketRef.current.emit('end-call');
-      if (currentRoomRef.current) {
+      socketRef.current.emit('end-call', { roomId: activeRoom });
+      if (activeRoom) {
         socketRef.current.emit('signal', {
-          roomId: currentRoomRef.current,
+          roomId: activeRoom,
           signalData: { callEnded: true }
         });
       }
@@ -289,9 +289,9 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd, exis
   };
 
   return (
-    <div className="w-full max-w-5xl mx-auto px-4 py-4 text-slate-100">
+    <div className="w-full max-w-5xl mx-auto px-2 sm:px-4 py-4 text-slate-100">
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-        <section className="lg:col-span-8 bg-slate-900/60 backdrop-blur-2xl border border-slate-800 rounded-3xl p-8 shadow-2xl flex flex-col items-center justify-between min-h-[540px] relative overflow-hidden">
+        <section className="lg:col-span-8 bg-slate-900/60 backdrop-blur-2xl border border-slate-800 rounded-3xl p-5 sm:p-8 shadow-2xl flex flex-col items-center justify-between min-h-[540px] relative overflow-hidden">
           <div className="w-full flex items-center justify-between border-b border-slate-800 pb-4 z-10">
             <span className="text-xs uppercase font-bold tracking-widest text-slate-400">Audio Session</span>
             <span className={`text-xs px-2.5 py-0.5 rounded-full font-semibold ${
@@ -313,7 +313,7 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd, exis
                 </>
               )}
 
-              <div className={`w-40 h-40 rounded-full flex items-center justify-center border-4 transition-all duration-500 shadow-2xl ${
+              <div className={`w-36 h-36 sm:w-40 sm:h-40 rounded-full flex items-center justify-center border-4 transition-all duration-500 shadow-2xl ${
                 status === 'connected'
                   ? isMuted ? 'border-amber-500 bg-amber-950/30' : 'border-emerald-500 bg-emerald-950/30 ring-8 ring-emerald-500/10'
                   : status === 'searching' ? 'border-cyan-400 bg-slate-800/80 ring-8 ring-cyan-500/10'
@@ -328,7 +328,7 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd, exis
                     <span className="text-sm font-mono text-cyan-300 mt-2 font-bold">{formatTimer(searchSeconds)}</span>
                   </div>
                 ) : (
-                  <span className="text-5xl select-none">{status === 'connected' ? (isMuted ? '🔇' : '🎙️') : '🎧'}</span>
+                  <span className="text-4xl sm:text-5xl select-none">{status === 'connected' ? (isMuted ? '🔇' : '🎙️') : '🎧'}</span>
                 )}
               </div>
 
@@ -341,7 +341,7 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd, exis
               )}
 
               <div className="text-center mt-6">
-                <h3 className="text-lg font-bold text-slate-100">
+                <h3 className="text-base sm:text-lg font-bold text-slate-100">
                   {status === 'idle' && 'Ready to Connect with a Peer'}
                   {status === 'searching' && 'Scanning for Active Speakers...'}
                   {status === 'connected' && (isMuted ? 'Microphone is MUTED' : `Talking with ${currentPartner?.name || 'Peer'}`)}
@@ -355,37 +355,45 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd, exis
                 <p className="text-xs text-slate-400">Connection closed cleanly.</p>
               </div>
 
+              {/* Responsive Partner Profile Card */}
               {currentPartner && (
-                <div className="bg-slate-800/60 border border-slate-700/60 p-4 rounded-2xl flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <img src={`https://api.dicebear.com/7.x/avataaars/svg?seed=${currentPartner.avatarSeed || currentPartner.name}`} className="w-10 h-10 rounded-xl" alt="" />
-                    <div>
-                      <h4 className="text-sm font-bold text-white">{currentPartner.name}</h4>
-                      <p className="text-xs text-slate-400">{currentPartner.email}</p>
+                <div className="bg-slate-850/70 border border-slate-750 p-4 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-md">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <img 
+                      src={`https://api.dicebear.com/7.x/avataaars/svg?seed=${currentPartner.avatarSeed || currentPartner.name}`} 
+                      className="w-11 h-11 rounded-xl bg-slate-800 border border-slate-700 shrink-0" 
+                      alt="" 
+                    />
+                    <div className="min-w-0 flex-1">
+                      <h4 className="text-sm font-bold text-white truncate">{currentPartner.name}</h4>
+                      <p className="text-xs text-slate-400 truncate">{currentPartner.email}</p>
                     </div>
                   </div>
 
-                  {isAlreadyFriend ? (
-                    <span className="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
-                      Already Friends 🤝
-                    </span>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={handleAddFriend}
-                      disabled={friendRequestSent}
-                      className={`px-4 py-2 rounded-xl text-xs font-bold transition cursor-pointer ${
-                        friendRequestSent 
-                          ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' 
-                          : 'bg-indigo-600 hover:bg-indigo-500 text-white'
-                      }`}
-                    >
-                      {friendRequestSent ? 'Request Pending ⏳' : 'Add to Friends 🤝'}
-                    </button>
-                  )}
+                  <div className="shrink-0 w-full sm:w-auto">
+                    {isAlreadyFriend ? (
+                      <span className="block text-center px-4 py-2 rounded-xl text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
+                        Already Friends 🤝
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={handleAddFriend}
+                        disabled={friendRequestSent}
+                        className={`w-full sm:w-auto px-4 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer active:scale-95 shadow ${
+                          friendRequestSent 
+                            ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' 
+                            : 'bg-indigo-600 hover:bg-indigo-500 text-white'
+                        }`}
+                      >
+                        {friendRequestSent ? 'Request Pending ⏳' : 'Add to Friends 🤝'}
+                      </button>
+                    )}
+                  </div>
                 </div>
               )}
 
+              {/* Report Form */}
               <form onSubmit={submitReport} className="bg-slate-800/40 border border-slate-700/50 p-4 rounded-2xl flex flex-col gap-3">
                 <span className="text-xs font-bold text-rose-400 uppercase tracking-wider">Report Misconduct ⚠️</span>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
@@ -411,7 +419,7 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd, exis
                 </button>
               </form>
 
-              <button onClick={() => setStatus('idle')} className="w-full py-3 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold rounded-2xl border border-slate-700 transition cursor-pointer">
+              <button onClick={() => setStatus('idle')} className="w-full py-3 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold rounded-2xl border border-slate-700 transition cursor-pointer active:scale-98">
                 Find Another Match 🔁
               </button>
             </div>
@@ -419,7 +427,7 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd, exis
 
           <div className="w-full border-t border-slate-800 pt-5 z-10">
             {status === 'idle' && (
-              <button onClick={startMatch} className="w-full py-3.5 bg-gradient-to-r from-indigo-600 to-cyan-600 hover:from-indigo-500 text-white font-bold text-sm rounded-2xl shadow-xl transition cursor-pointer">
+              <button onClick={startMatch} className="w-full py-3.5 bg-gradient-to-r from-indigo-600 to-cyan-600 hover:from-indigo-500 text-white font-bold text-sm rounded-2xl shadow-xl transition cursor-pointer active:scale-98">
                 Find Random Peer ⚡
               </button>
             )}
@@ -435,7 +443,7 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd, exis
                 <button onClick={toggleMute} className={`py-3 rounded-2xl border font-bold text-xs transition cursor-pointer ${isMuted ? 'bg-rose-500 text-white border-rose-500' : 'bg-slate-800 border-slate-700 text-slate-200'}`}>
                   {isMuted ? '🔇 Unmute Mic' : '🎙️ Mute Mic'}
                 </button>
-                <button onClick={endCall} className="py-3 bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs rounded-2xl transition cursor-pointer shadow-lg">
+                <button onClick={endCall} className="py-3 bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs rounded-2xl transition cursor-pointer shadow-lg active:scale-98">
                   Disconnect ✕
                 </button>
               </div>
