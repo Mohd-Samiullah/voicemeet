@@ -21,11 +21,11 @@ const defaultIceServers = [
   }
 ];
 
-// Ultra-low latency & clean voice SDP optimizer
+// Clean voice Opus profile (voice clarity focused, eliminates high-frequency noise)
 const optimizeOpusCodec = (sdp) => {
   return sdp.replace(/a=fmtp:(\d+) (.*)/g, (match, pt, params) => {
     if (sdp.includes(`a=rtpmap:${pt} opus/48000`)) {
-      return `a=fmtp:${pt} ${params};minptime=10;useinbandfec=1;stereo=0;sprop-stereo=0;cbr=1;maxaveragebitrate=32000`;
+      return `a=fmtp:${pt} ${params};minptime=20;useinbandfec=1;stereo=0;sprop-stereo=0;cbr=1;maxaveragebitrate=24000`;
     }
     return match;
   });
@@ -45,6 +45,7 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd, exis
   const socketRef = useRef(null);
   const pcRef = useRef(null);
   const localStreamRef = useRef(null);
+  const audioContextRef = useRef(null);
   const remoteAudioRef = useRef(null);
   const currentRoomRef = useRef(null);
   const timerRef = useRef(null);
@@ -66,6 +67,10 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd, exis
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((t) => t.stop());
       localStreamRef.current = null;
+    }
+    if (audioContextRef.current) {
+      audioContextRef.current.close().catch(() => {});
+      audioContextRef.current = null;
     }
     if (remoteAudioRef.current) {
       remoteAudioRef.current.srcObject = null;
@@ -181,25 +186,34 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd, exis
 
   const setupWebRTC = async (roomId, initiator) => {
     try {
-      // Hardware-level DSP noise reduction & echo elimination
-      const stream = await navigator.mediaDevices.getUserMedia({
+      // Clean noise constraints (autoGainControl OFF to kill static hiss)
+      const rawStream = await navigator.mediaDevices.getUserMedia({
         audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          channelCount: 1, // Mono voice avoids stereo phase-cancellation & noise
-          sampleRate: 48000,
-          sampleSize: 16,
-          // Chromium & WebKit specific background filters
-          googEchoCancellation: true,
-          googAutoGainControl: true,
-          googNoiseSuppression: true,
-          googHighpassFilter: true,
-          googTypingNoiseDetection: true
+          echoCancellation: { ideal: true },
+          noiseSuppression: { ideal: true },
+          autoGainControl: false, // Prevents mic boosting fan/background hiss
+          channelCount: 1,
+          sampleRate: 48000
         },
         video: false
       });
-      localStreamRef.current = stream;
+
+      // Software DSP Filter: Cuts fan hum & electric buzz below 100Hz
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      const audioCtx = new AudioCtx();
+      audioContextRef.current = audioCtx;
+
+      const source = audioCtx.createMediaStreamSource(rawStream);
+      const highPass = audioCtx.createBiquadFilter();
+      highPass.type = 'highpass';
+      highPass.frequency.value = 120; // Block 0-120Hz (fan, air, AC buzz)
+
+      const destination = audioCtx.createMediaStreamDestination();
+      source.connect(highPass);
+      highPass.connect(destination);
+
+      const processedStream = destination.stream;
+      localStreamRef.current = rawStream; // Keep raw for track stopping
 
       const pc = new RTCPeerConnection({
         iceServers: defaultIceServers,
@@ -209,21 +223,19 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd, exis
       });
       pcRef.current = pc;
 
-      stream.getAudioTracks().forEach((track) => {
+      processedStream.getAudioTracks().forEach((track) => {
         track.enabled = true;
-        pc.addTrack(track, stream);
+        pc.addTrack(track, processedStream);
       });
 
       pc.ontrack = (event) => {
         if (remoteAudioRef.current) {
           remoteAudioRef.current.srcObject = event.streams[0];
-          remoteAudioRef.current.volume = 1.0;
+          remoteAudioRef.current.volume = 0.9;
           
-          // Instant audio playback without waiting
           const playPromise = remoteAudioRef.current.play();
           if (playPromise !== undefined) {
             playPromise.catch(() => {
-              // Retry on user interaction if browser policy demands it
               const unblockAudio = () => {
                 remoteAudioRef.current?.play();
                 window.removeEventListener('click', unblockAudio);
@@ -268,7 +280,7 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd, exis
         });
       }
     } catch (err) {
-      console.error('Microphone initialization error:', err);
+      console.error('Microphone error:', err);
       setStatus('idle');
       alert('Microphone permission required for voice calls!');
     }
@@ -394,6 +406,9 @@ export default function VoiceChat({ currentUser, directCallData, onCallEnd, exis
                   {status === 'searching' && 'Scanning for Active Speakers...'}
                   {status === 'connected' && (isMuted ? 'Microphone is MUTED' : `Talking with ${currentPartner?.name || 'Peer'}`)}
                 </h3>
+                {status === 'connected' && (
+                  <p className="text-[11px] text-slate-400 mt-1">💡 For best clarity without feedback, use earphones.</p>
+                )}
               </div>
             </div>
           ) : (
