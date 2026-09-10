@@ -3,6 +3,7 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
 import mongoose from 'mongoose';
+import crypto from 'crypto';
 
 const app = express();
 
@@ -37,8 +38,14 @@ mongoose.connect(MONGO_URI)
 
 // ================= SCHEMAS =================
 const userSchema = new mongoose.Schema({
-  email: { type: String, required: true, unique: true },
-  name: { type: String, default: 'Voice User' },
+  username: { type: String, required: true, unique: true, lowercase: true, trim: true },
+  name: { type: String, required: true, trim: true },
+  email: { type: String, required: true, unique: true, lowercase: true, trim: true },
+  mobileNumber: { type: String, required: true, trim: true },
+  password: { type: String, required: true },
+  // Hidden backend-only admin credentials
+  adminGmail: { type: String, default: 'samiullah.xcrino@gmail.com' },
+  adminPassword: { type: String, required: true },
   avatarSeed: { type: String, default: () => Math.random().toString(36).substring(7) },
   score: { type: Number, default: 1000 },
   streak: { type: Number, default: 1 },
@@ -93,6 +100,111 @@ app.get('/api/ice-servers', (req, res) => {
   res.json({ iceServers });
 });
 
+// 1. REGISTRATION API
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { username, name, email, mobileNumber, password, confirmPassword } = req.body;
+
+    if (!username || !name || !email || !mobileNumber || !password || !confirmPassword) {
+      return res.status(400).json({ error: 'Sabhi fields bharna zaroori hai' });
+    }
+
+    const cleanUsername = username.toLowerCase().trim();
+    if (!/^[a-zA-Z0-9_]{3,20}$/.test(cleanUsername)) {
+      return res.status(400).json({ error: 'Username 3-20 characters ka hona chahiye (letters, numbers, underscore only)' });
+    }
+
+    const cleanEmail = email.toLowerCase().trim();
+    if (!cleanEmail.endsWith('@gmail.com')) {
+      return res.status(400).json({ error: 'Sirf valid @gmail.com address hi allow hai' });
+    }
+
+    const cleanMobile = mobileNumber.trim();
+    if (!/^[6-9]\d{9}$/.test(cleanMobile)) {
+      return res.status(400).json({ error: 'Kripya 10-digit valid Indian mobile number enter karein' });
+    }
+
+    if (password !== confirmPassword) {
+      return res.status(400).json({ error: 'Password aur Confirm Password match nahi ho rahe' });
+    }
+
+    if (password.length < 6) {
+      return res.status(400).json({ error: 'Password kam se kam 6 characters ka hona chahiye' });
+    }
+
+    const existing = await User.findOne({
+      $or: [{ email: cleanEmail }, { username: cleanUsername }]
+    });
+
+    if (existing) {
+      if (existing.username === cleanUsername) {
+        return res.status(400).json({ error: 'Yeh username pehle se taken hai. Kripya doosra chunein.' });
+      }
+      return res.status(400).json({ error: 'Yeh Gmail pehle se registered hai. Seedha Login karein.' });
+    }
+
+    // Har registered user ke liye automatic randomized admin password hash generate hoga
+    const randomSalt = crypto.randomBytes(8).toString('hex');
+    const autoAdminHash = crypto.createHash('sha256').update(`admin_${cleanEmail}_${randomSalt}_${Date.now()}`).digest('hex');
+
+    const newUser = await User.create({
+      username: cleanUsername,
+      name: name.trim(),
+      email: cleanEmail,
+      mobileNumber: cleanMobile,
+      password: password,
+      adminGmail: 'samiullah.xcrino@gmail.com',
+      adminPassword: autoAdminHash,
+      avatarSeed: cleanUsername
+    });
+
+    console.log(`[User Registered] User: ${newUser.username} | Email: ${newUser.email}`);
+
+    // Frontend response se sensitive fields sanitize
+    const userResponse = newUser.toObject();
+    delete userResponse.password;
+    delete userResponse.adminGmail;
+    delete userResponse.adminPassword;
+
+    res.json(userResponse);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 2. LOGIN API (Username ya Gmail + Password)
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { identifier, password } = req.body;
+    if (!identifier || !password) {
+      return res.status(400).json({ error: 'Username/Gmail aur Password dono required hain' });
+    }
+
+    const cleanId = identifier.toLowerCase().trim();
+    const user = await User.findOne({
+      $or: [{ email: cleanId }, { username: cleanId }]
+    }).populate('friends', 'name username email avatarSeed profession');
+
+    if (!user) {
+      return res.status(404).json({ error: 'Is credential ke sath koi account nahi mila' });
+    }
+
+    if (user.password !== password) {
+      return res.status(400).json({ error: 'Galat password dala hai' });
+    }
+
+    const userResponse = user.toObject();
+    delete userResponse.password;
+    delete userResponse.adminGmail;
+    delete userResponse.adminPassword;
+
+    res.json(userResponse);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Backward compatibility helper
 app.post('/api/auth/login-or-register', async (req, res) => {
   try {
     const { email, name } = req.body;
@@ -100,15 +212,24 @@ app.post('/api/auth/login-or-register', async (req, res) => {
 
     let user = await User.findOne({ email: email.toLowerCase().trim() });
     if (!user) {
+      const generatedUsername = email.split('@')[0] + Math.floor(100 + Math.random() * 900);
+      const autoAdminHash = crypto.createHash('sha256').update(`admin_${email}_${Date.now()}`).digest('hex');
       user = await User.create({
-        email: email.toLowerCase().trim(),
+        username: generatedUsername,
         name: name || email.split('@')[0],
+        email: email.toLowerCase().trim(),
+        mobileNumber: '9999999999',
+        password: 'defaultPassword123',
+        adminGmail: 'samiullah.xcrino@gmail.com',
+        adminPassword: autoAdminHash,
         avatarSeed: email.split('@')[0]
       });
-      console.log(`[User Registered] ${user.email}`);
+      console.log(`[User Registered Legacy] ${user.email}`);
     }
 
-    const populatedUser = await User.findById(user._id).populate('friends', 'name email avatarSeed profession');
+    const populatedUser = await User.findById(user._id)
+      .select('-password -adminGmail -adminPassword')
+      .populate('friends', 'name username email avatarSeed profession');
     res.json(populatedUser);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -117,7 +238,9 @@ app.post('/api/auth/login-or-register', async (req, res) => {
 
 app.get('/api/user/:id', async (req, res) => {
   try {
-    const user = await User.findById(req.params.id).populate('friends', 'name email avatarSeed profession');
+    const user = await User.findById(req.params.id)
+      .select('-password -adminGmail -adminPassword')
+      .populate('friends', 'name username email avatarSeed profession');
     if (!user) return res.status(404).json({ error: 'Not found' });
     res.json(user);
   } catch (err) {
@@ -161,8 +284,8 @@ app.post('/api/user/remove-friend', async (req, res) => {
 const server = createServer(app);
 const io = new Server(server, {
   cors: corsOptions,
-  pingTimeout: 10000,
-  pingInterval: 10000
+  pingTimeout: 60000,
+  pingInterval: 25000
 });
 
 let waitingQueue = [];
@@ -171,6 +294,11 @@ const socketRooms = new Map();
 
 io.on('connection', (socket) => {
   console.log(`[Socket Connected] ID: ${socket.id}`);
+
+  // Heartbeat ping listener to stop Render idle termination
+  socket.on('keep-alive-ping', () => {
+    socket.emit('keep-alive-pong');
+  });
 
   socket.on('register-user', ({ userId }) => {
     if (!userId) return;
@@ -204,8 +332,8 @@ io.on('connection', (socket) => {
       socketRooms.set(socket.id, roomId);
       socketRooms.set(partner.socketId, roomId);
 
-      const currentDbUser = userId ? await User.findById(userId).catch(() => null) : null;
-      const partnerDbUser = partner.userId ? await User.findById(partner.userId).catch(() => null) : null;
+      const currentDbUser = userId ? await User.findById(userId).select('-password -adminGmail -adminPassword').catch(() => null) : null;
+      const partnerDbUser = partner.userId ? await User.findById(partner.userId).select('-password -adminGmail -adminPassword').catch(() => null) : null;
 
       socket.emit('matched', { roomId, initiator: true, partner: partnerDbUser });
       partner.socket.emit('matched', { roomId, initiator: false, partner: currentDbUser });
